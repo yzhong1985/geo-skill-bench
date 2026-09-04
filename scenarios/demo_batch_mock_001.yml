@@ -1,0 +1,60 @@
+id: demo_batch_mock_001
+name: 演示-批次重复运行（本地 mock，无外部依赖）
+version: 1.0.0
+type: agent_skill_test
+description: >
+  迭代6批次能力演示场景：本地 mock MCP（http transport）+ 规则 agent，
+  不依赖真实 LLM、云端 MCP 或数据服务，可离线重复运行。
+target:
+  skill_id: demo_buffer_analysis
+  skill_version: 1.0.0
+runtime:
+  executor: skill
+  agent_model: rule-based-agent
+  max_turns: 6
+  timeout_seconds: 180
+  memory_enabled: false
+data:
+  fixtures:
+    - id: schools
+      name: 学校点数据
+      path: ../fixtures/schools.geojson
+mcp:
+  servers:
+    - id: mock_gis
+      name: 本地 mock GIS MCP
+      transport: http
+      url: http://127.0.0.1:8765/mcp
+      required: true
+  tools:
+    required:
+      - server: mock_gis
+        name: create_buffer
+skill:
+  load_mode: file
+  path: ../skills/demo_buffer_analysis.skill.yml
+  required: true
+user_task: 请帮我生成 schools 数据周边 500 米的服务范围。
+expected_behavior:
+  should_load_skills:
+    - demo_buffer_analysis
+  should_call_tools:
+    - create_buffer
+assertions:
+  - type: skill_loaded
+    skill_id: demo_buffer_analysis
+  - type: tool_called
+    tool: create_buffer
+  - type: tool_argument_equals
+    tool: create_buffer
+    argument: distance
+    value: 500
+  - type: final_response_contains
+    values:
+      - "500"
+      - "缓冲区"
+judge:
+  enabled: true
+pass_criteria:
+  required_assertions_passed: true
+  judge_score_min: 0.8

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
+from geoskillbench.models.batch import BatchResult, BatchSummary
 from geoskillbench.models.result import TestResult
 from geoskillbench.security.redaction import redact
 
@@ -31,7 +33,8 @@ class ReportGenerator:
             lines.append(f"- `{stage}`: `{status}`")
         lines.extend(["", "## Assertions"])
         for item in result.assertions:
-            lines.append(f"- `{item['type']}`: `{'passed' if item['passed'] else 'failed'}` - {item['message']}")
+            backend = f" [{item['backend']}]" if item.get("backend") else ""
+            lines.append(f"- `{item['type']}`{backend}: `{'passed' if item['passed'] else 'failed'}` - {item['message']}")
         lines.extend(["", "## Judge"])
         judge = result.judge or {}
         lines.append(f"- Mode: `{judge.get('judge_mode', '')}`")
@@ -93,29 +96,122 @@ class ReportGenerator:
             lines.append("- (无)")
         return "\n".join(lines)
 
+    def generate_batch_json(self, batch_result: BatchResult) -> str:
+        return json.dumps(redact(batch_result.model_dump()), ensure_ascii=False, indent=2)
+
+    def generate_batch_markdown(self, batch_result: BatchResult) -> str:
+        summary = batch_result.summary
+        req = batch_result.request
+        lines = [
+            f"# 批次评测报告：`{batch_result.batch_id}`",
+            "",
+            f"- Status: `{summary.status}`",
+            f"- Total Runs: `{summary.total_runs}` (Passed: `{summary.passed_runs}`, Failed: `{summary.failed_runs}`, Not Evaluable: `{summary.not_evaluable_runs}`)",
+            f"- Pass Rate: `{summary.pass_rate * 100:.1f}%`",
+            f"- Repeat Count per Scenario: `{req.repeat_count}`",
+            f"- Created At: `{summary.created_at}`",
+            "",
+            "## 1. 总体分布与方差指标",
+            "",
+            "| 指标 | 均值 (Mean) | 标准差 (StdDev) | 最小值 (Min) | 中位数 (P50) | P90 | 最大值 (Max) |",
+            "|---|---|---|---|---|---|---|",
+            f"| 耗时 (ms) | {summary.overall_variance.duration_ms.mean} | {summary.overall_variance.duration_ms.std_dev} | {summary.overall_variance.duration_ms.min} | {summary.overall_variance.duration_ms.p50} | {summary.overall_variance.duration_ms.p90} | {summary.overall_variance.duration_ms.max} |",
+            f"| 工具调用次数 | {summary.overall_variance.tool_calls_count.mean} | {summary.overall_variance.tool_calls_count.std_dev} | {summary.overall_variance.tool_calls_count.min} | {summary.overall_variance.tool_calls_count.p50} | {summary.overall_variance.tool_calls_count.p90} | {summary.overall_variance.tool_calls_count.max} |",
+            f"| 对话交互轮次 | {summary.overall_variance.conversation_turns.mean} | {summary.overall_variance.conversation_turns.std_dev} | {summary.overall_variance.conversation_turns.min} | {summary.overall_variance.conversation_turns.p50} | {summary.overall_variance.conversation_turns.p90} | {summary.overall_variance.conversation_turns.max} |",
+            f"| Judge 打分 | {summary.overall_variance.judge_score.mean} | {summary.overall_variance.judge_score.std_dev} | {summary.overall_variance.judge_score.min} | {summary.overall_variance.judge_score.p50} | {summary.overall_variance.judge_score.p90} | {summary.overall_variance.judge_score.max} |",
+            "",
+            f"- **轨迹多样性熵 (Trajectory Entropy)**: `{summary.overall_variance.trajectory_entropy}` (值越低代表 Agent 执行路径越确定/稳定)",
+            "",
+            "### 工具使用频次与覆盖率",
+            "",
+            "| 工具名 | 总调用次数 | 出现的 Run 数 | Run 覆盖率 | 单 Run 平均调用 |",
+            "|---|---|---|---|---|",
+        ]
+        for t in summary.overall_variance.tool_usage_breakdown:
+            lines.append(f"| `{t.tool_name}` | {t.total_calls} | {t.runs_used_in} | {t.usage_rate * 100:.1f}% | {t.mean_calls_per_run} |")
+
+        lines.extend(["", "## 2. 按场景明细汇总", ""])
+        lines.append("| 场景 ID | 场景名称 | 总运行 | 通过数 | 通过率 | 平均耗时 (ms) | 工具均值 | Judge 均分 |")
+        lines.append("|---|---|---|---|---|---|---|---|")
+        for sc_id, sc in summary.by_scenario.items():
+            lines.append(
+                f"| `{sc_id}` | {sc.scenario_name} | {sc.total_runs} | {sc.passed_runs} | {sc.pass_rate * 100:.1f}% | {sc.variance.duration_ms.mean} | {sc.variance.tool_calls_count.mean} | {sc.variance.judge_score.mean} |"
+            )
+
+        lines.extend(["", "## 3. 子运行记录", ""])
+        lines.append("| Run ID | 场景 ID | 迭代轮次 | 最终状态 | 评测结论 | 耗时 (ms) | 工具数 | Judge 得分 |")
+        lines.append("|---|---|---|---|---|---|---|---|")
+        for r in batch_result.runs:
+            lines.append(
+                f"| `{r.run_id}` | `{r.scenario_id}` | #{r.iteration} | `{r.status}` | `{r.evaluation_verdict}` | {r.duration_ms} | {r.tool_call_count} | {r.judge_score} |"
+            )
+        return "\n".join(lines)
+
     def write_reports(self, output_dir: str, result: TestResult) -> tuple[Path, Path]:
-        # run 级目录（reports/runs/<run_id>/）与 latest 兼容视图属于后续 artifact 迭代，
-        # 5A 保持 scenario_id 旧布局，/api/reports 行为不变。
+        """统一按 reports/runs/<run_id>/ 保存运行产物，并在 legacy 目录下保留 latest 视图（向后兼容）。"""
         base_dir = Path(output_dir)
-        json_dir = base_dir / "json"
-        md_dir = base_dir / "markdown"
-        json_dir.mkdir(parents=True, exist_ok=True)
-        md_dir.mkdir(parents=True, exist_ok=True)
-        json_path = json_dir / f"{result.scenario_id}.json"
-        md_path = md_dir / f"{result.scenario_id}.md"
+        run_dir = base_dir / "runs" / result.run_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+
+        json_path = run_dir / "result.json"
+        md_path = run_dir / "report.md"
         json_text = self.generate_json(result)
         md_text = self.generate_markdown(result)
         json_path.write_text(json_text, encoding="utf-8")
         md_path.write_text(md_text, encoding="utf-8")
+
+        # 兼容旧路径: reports/json/{scenario_id}.json & reports/markdown/{scenario_id}.md
+        legacy_json_dir = base_dir / "json"
+        legacy_md_dir = base_dir / "markdown"
+        legacy_json_dir.mkdir(parents=True, exist_ok=True)
+        legacy_md_dir.mkdir(parents=True, exist_ok=True)
+        (legacy_json_dir / f"{result.scenario_id}.json").write_text(json_text, encoding="utf-8")
+        (legacy_md_dir / f"{result.scenario_id}.md").write_text(md_text, encoding="utf-8")
+
         self._persist_to_db(result, json_text, md_text)
         return json_path, md_path
 
-    def _persist_to_db(self, result: TestResult, json_text: str, md_text: str) -> None:
-        """阶段二：把报告全文写入 reports 表（SQLite 本地 / PostGIS 服务器，由 DATABASE_URL 决定）。
+    def write_batch_reports(self, output_dir: str, batch_result: BatchResult) -> tuple[Path, Path]:
+        """保存批次聚合产物至 reports/batches/<batch_id>/ 并持久化至 DB。"""
+        base_dir = Path(output_dir)
+        batch_dir = base_dir / "batches" / batch_result.batch_id
+        batch_dir.mkdir(parents=True, exist_ok=True)
 
-        DB 写入失败只记日志、不影响主流程——评测结果已落在文件系统，
-        持久化是增强能力，不能因数据库问题让整个 run 失败。
-        """
+        json_path = batch_dir / "summary.json"
+        md_path = batch_dir / "summary.md"
+        json_text = self.generate_batch_json(batch_result)
+        md_text = self.generate_batch_markdown(batch_result)
+        json_path.write_text(json_text, encoding="utf-8")
+        md_path.write_text(md_text, encoding="utf-8")
+
+        self._persist_batch_to_db(batch_result, json_text)
+        return json_path, md_path
+
+    def _persist_batch_to_db(self, batch_result: BatchResult, json_text: str) -> None:
+        from geoskillbench.api import db
+
+        try:
+            summary = batch_result.summary
+            db.save_batch(
+                {
+                    "batch_id": batch_result.batch_id,
+                    "created_at": summary.created_at,
+                    "status": summary.status,
+                    "total_runs": summary.total_runs,
+                    "passed_runs": summary.passed_runs,
+                    "failed_runs": summary.failed_runs,
+                    "pass_rate": summary.pass_rate,
+                    "summary_json": json.dumps(summary.model_dump(), ensure_ascii=False),
+                    "result_json": json_text,
+                }
+            )
+        except Exception as exc:
+            import logging
+
+            logging.getLogger(__name__).warning("Failed to persist batch report to DB: %s", redact(str(exc)))
+
+    def _persist_to_db(self, result: TestResult, json_text: str, md_text: str) -> None:
+        """阶段二：把报告全文写入 reports 表（SQLite 本地 / PostGIS 服务器，由 DATABASE_URL 决定）。"""
         from geoskillbench.api import db
 
         safe_result = redact(result.model_dump())

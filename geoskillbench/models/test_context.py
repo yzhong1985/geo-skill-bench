@@ -26,13 +26,17 @@ class SkillContext(BaseModel):
 class DatasetContext(BaseModel):
     handle: str
     name: str
+    role: str = "input"
+    run_id: str | None = None
     geometry_type: str | None = None
     crs: str | None = None
     feature_count: int | None = None
     fields: list[str] = Field(default_factory=list)
+    # 仅兼容历史本地 fixture；服务化 5B descriptor 不应设置 path。
     path: str | None = None
     semantic_desc: str | None = None
     source_alias: str | None = None
+    expires_at: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 

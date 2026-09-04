@@ -100,6 +100,9 @@ class AssertionItemResult(BaseModel):
     passed: bool
     message: str
     target: str | None = None
+    actual: Any = None
+    expected: Any = None
+    backend: Literal["file", "postgis"] | None = None
 
 
 class AssertionResult(BaseModel):

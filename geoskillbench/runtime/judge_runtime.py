@@ -54,18 +54,6 @@ class JudgeEngine:
             llm_result.status = "passed" if llm_result.passed else "failed"
             llm_result.status = "passed" if llm_result.passed else "failed"
             llm_result.status = "passed" if llm_result.passed else "failed"
-            llm_result.status = "passed" if llm_result.passed else "failed"
-            llm_result.status = "passed" if llm_result.passed else "failed"
-            llm_result.status = "passed" if llm_result.passed else "failed"
-            llm_result.status = "passed" if llm_result.passed else "failed"
-            llm_result.status = "passed" if llm_result.passed else "failed"
-            llm_result.status = "passed" if llm_result.passed else "failed"
-            llm_result.status = "passed" if llm_result.passed else "failed"
-            llm_result.status = "passed" if llm_result.passed else "failed"
-            llm_result.status = "passed" if llm_result.passed else "failed"
-            llm_result.status = "passed" if llm_result.passed else "failed"
-            llm_result.status = "passed" if llm_result.passed else "failed"
-            llm_result.status = "passed" if llm_result.passed else "failed"
             if not llm_result.reason:
                 llm_result.reason = (
                     "智能体按场景完成了主要流程。"

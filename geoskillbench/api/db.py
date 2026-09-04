@@ -1,27 +1,33 @@
-"""评测报告持久化连接层（阶段二）。
+"""评测报告与批次持久化连接层（阶段二与迭代六）。
 
 - DATABASE_URL 为空（本地开发）→ 自动用 SQLite 文件库 reports.db，零配置可跑。
 - DATABASE_URL 非空（服务器部署）→ 用 PostGIS / PostgreSQL：
       DATABASE_URL=postgresql+psycopg://user:pass@host:5432/dbname
   同一份代码，通过 .env 切换，结构不变。
+- 网络库连接超时 3 秒（connect_timeout）。库不可达时由 /api/runs 等接口按设计降级，
+  避免等操作系统 TCP 超时把前端代理拖成 500。
 
-只有一张 reports 表：存评测报告的 JSON + Markdown 全文。
-（agent 结果地图不重复存——报告里已有数据服务 URL，要查直接点链接。）
+表结构：
+1. reports 表：存单次评测报告的 JSON + Markdown 全文及摘要。
+2. batches 表：存批次运行（Batch/Repeat）的聚合汇总与 JSON 全文。
 """
 
 from __future__ import annotations
 
+import json
 import os
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from dotenv import load_dotenv
-from sqlalchemy import String, Text, create_engine, delete, select
+from sqlalchemy import Float, Integer, String, Text, create_engine, delete, select
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
 load_dotenv()
 
 DEFAULT_DATABASE_URL = "sqlite:///./reports.db"  # 本地开发兜底，不依赖服务器
+DB_CONNECT_TIMEOUT_SECONDS = 3
 
 
 class Base(DeclarativeBase):
@@ -36,9 +42,24 @@ class RunReport(Base):
     scenario_name: Mapped[str] = mapped_column(String, default="")
     executor: Mapped[str] = mapped_column(String, default="")
     status: Mapped[str] = mapped_column(String, default="")
-    created_at: Mapped[datetime] = mapped_column(String, default=lambda: datetime.now(UTC).isoformat())
+    batch_id: Mapped[str | None] = mapped_column(String, index=True, nullable=True)
+    created_at: Mapped[str] = mapped_column(String, default=lambda: datetime.now(UTC).isoformat())
     json_content: Mapped[str] = mapped_column(Text, default="")
     md_content: Mapped[str] = mapped_column(Text, default="")
+
+
+class BatchReport(Base):
+    __tablename__ = "batches"
+
+    batch_id: Mapped[str] = mapped_column(String, primary_key=True)
+    created_at: Mapped[str] = mapped_column(String, default=lambda: datetime.now(UTC).isoformat())
+    status: Mapped[str] = mapped_column(String, default="succeeded")
+    total_runs: Mapped[int] = mapped_column(Integer, default=0)
+    passed_runs: Mapped[int] = mapped_column(Integer, default=0)
+    failed_runs: Mapped[int] = mapped_column(Integer, default=0)
+    pass_rate: Mapped[float] = mapped_column(Float, default=0.0)
+    summary_json: Mapped[str] = mapped_column(Text, default="{}")
+    result_json: Mapped[str] = mapped_column(Text, default="{}")
 
 
 def _database_url() -> str:
@@ -46,10 +67,15 @@ def _database_url() -> str:
     return url or DEFAULT_DATABASE_URL
 
 
+def _connect_args(url: str) -> dict:
+    if url.startswith("sqlite"):
+        return {"check_same_thread": False}
+    return {"connect_timeout": DB_CONNECT_TIMEOUT_SECONDS}
+
+
 def _engine():
     url = _database_url()
-    connect_args = {"check_same_thread": False} if url.startswith("sqlite") else {}
-    return create_engine(url, connect_args=connect_args, pool_pre_ping=True)
+    return create_engine(url, connect_args=_connect_args(url), pool_pre_ping=True)
 
 
 _engine_instance = None
@@ -70,6 +96,8 @@ def _session():
     return _session_factory()
 
 
+# ---------- 单次运行报告持久化 ----------
+
 def save_report(report: dict) -> None:
     """持久化一条报告。report 需含 run_id/scenario_id/scenario_name/executor/status/json/md。"""
     with _session() as session:
@@ -80,19 +108,22 @@ def save_report(report: dict) -> None:
                 scenario_name=report.get("scenario_name", ""),
                 executor=report.get("executor", ""),
                 status=report.get("status", ""),
+                batch_id=report.get("batch_id"),
                 json_content=report.get("json", ""),
                 md_content=report.get("md", ""),
             )
         )
         session.commit()
-    prune_reports()  # 只保留最近 N 条历史，旧记录自动销毁
+    prune_reports()
 
 
-def list_reports(scenario_id: str | None = None) -> list[dict]:
+def list_reports(scenario_id: str | None = None, batch_id: str | None = None) -> list[dict]:
     with _session() as session:
         statement = select(RunReport).order_by(RunReport.created_at.desc())
         if scenario_id:
             statement = statement.where(RunReport.scenario_id == scenario_id)
+        if batch_id:
+            statement = statement.where(RunReport.batch_id == batch_id)
         return [_report_dict(row) for row in session.scalars(statement)]
 
 
@@ -109,9 +140,62 @@ def _report_dict(row: RunReport) -> dict:
         "scenario_name": row.scenario_name,
         "executor": row.executor,
         "status": row.status,
+        "batch_id": row.batch_id,
         "created_at": row.created_at,
         "json": row.json_content,
         "md": row.md_content,
+    }
+
+
+# ---------- 批次运行持久化 ----------
+
+def save_batch(batch_data: dict[str, Any]) -> None:
+    """持久化一个批次运行结果。"""
+    with _session() as session:
+        session.merge(
+            BatchReport(
+                batch_id=batch_data["batch_id"],
+                created_at=batch_data.get("created_at") or datetime.now(UTC).isoformat(),
+                status=batch_data.get("status", "succeeded"),
+                total_runs=int(batch_data.get("total_runs", 0)),
+                passed_runs=int(batch_data.get("passed_runs", 0)),
+                failed_runs=int(batch_data.get("failed_runs", 0)),
+                pass_rate=float(batch_data.get("pass_rate", 0.0)),
+                summary_json=batch_data.get("summary_json", "{}"),
+                result_json=batch_data.get("result_json", "{}"),
+            )
+        )
+        session.commit()
+
+
+def list_batches() -> list[dict[str, Any]]:
+    with _session() as session:
+        statement = select(BatchReport).order_by(BatchReport.created_at.desc())
+        return [_batch_dict(row) for row in session.scalars(statement)]
+
+
+def get_batch(batch_id: str) -> dict[str, Any] | None:
+    with _session() as session:
+        row = session.get(BatchReport, batch_id)
+        return _batch_dict(row) if row else None
+
+
+def _batch_dict(row: BatchReport) -> dict[str, Any]:
+    summary = {}
+    try:
+        summary = json.loads(row.summary_json)
+    except Exception:
+        pass
+    return {
+        "batch_id": row.batch_id,
+        "created_at": row.created_at,
+        "status": row.status,
+        "total_runs": row.total_runs,
+        "passed_runs": row.passed_runs,
+        "failed_runs": row.failed_runs,
+        "pass_rate": row.pass_rate,
+        "summary": summary,
+        "result_json": row.result_json,
     }
 
 
@@ -123,12 +207,6 @@ def reports_db_path() -> str:
 
 
 def prune_reports(keep: int | None = None) -> int:
-    """只保留最近 keep 条历史评测，删除更早记录（物理删除，不可恢复）。
-
-    阈值优先级：keep 参数 > GEO_BENCH_HISTORY_KEEP 环境变量 > 默认 100。
-    返回删除的行数。DB 故障不在此吞异常——save_report 调用方的
-    try/except 与 lifespan 启动清理各自的 catch 负责兜底。
-    """
     limit = keep if keep is not None else _history_keep()
     with _session() as session:
         statement = delete(RunReport).where(
@@ -142,8 +220,7 @@ def prune_reports(keep: int | None = None) -> int:
 
 
 def _history_keep() -> int:
-    raw = os.environ.get("GEO_BENCH_HISTORY_KEEP", "100").strip()
     try:
-        return max(1, int(raw))
+        return int(os.environ.get("GEO_BENCH_HISTORY_KEEP", "100"))
     except ValueError:
         return 100

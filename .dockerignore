@@ -31,3 +31,6 @@ reports.db
 # IDE
 .idea/
 .vscode/
+
+# 个人配置、简历等私人文件（不进镜像）
+.claude/

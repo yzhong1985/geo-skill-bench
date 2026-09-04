@@ -15,34 +15,48 @@ class RuntimeConfig(BaseModel):
 
 
 class FixtureConfig(BaseModel):
-    # 只需 id + path（本地文件）或 id + table（db_table）；name/type/format/crs/geometry_type 均可省略，
-    # 由 FixtureManager 从文件/数据库自动识别（format 缺省按扩展名，db_table 需显式声明）。
+    # 5B 正式数据引用使用 catalog_id/evaluation_id；path/table 仅保留用于尚未迁移的历史配置。
     id: str
     name: str = ""
     type: str = "vector"
     format: str | None = None
     path: str | None = None
+    catalog_id: str | None = None
+    evaluation_id: str | None = None
     crs: str | None = None
     geometry_type: str | None = None
     import_as: str = "dataset"
     register_metadata: bool = True
     cleanup: bool = True
-    # 数据库数据源（format: db_table）：从 PostGIS 表拉取为本地临时文件供比对；path 缺省
-    db_url: str | None = None  # 缺省回落到 DATABASE_URL 环境变量
+    db_url: str | None = None
     table: str | None = None
-    db_schema: str | None = "public"  # 避免与 pydantic BaseModel.schema 冲突
+    db_schema: str | None = "public"
 
     @model_validator(mode="after")
-    def _check_path_or_table(self) -> "FixtureConfig":
-        if self.format == "db_table":
-            if not self.table:
-                raise ValueError(f"fixture {self.id}: format=db_table 时 table 必填")
-        elif not self.path:
-            raise ValueError(f"fixture {self.id}: 非 db_table 格式需要 path")
+    def _check_reference(self) -> "FixtureConfig":
+        if not self.path and not self.table and not self.catalog_id and not self.evaluation_id:
+            raise ValueError(f"fixture {self.id}: requires catalog_id/evaluation_id or legacy path/table")
+        return self
+
+
+class DataServiceConfig(BaseModel):
+    """数据服务控制面配置；认证只允许环境变量引用。"""
+
+    url: str
+    credential_env: str | None = None
+    timeout_seconds: float = 30.0
+
+    @model_validator(mode="after")
+    def _check_url_and_credential(self) -> "DataServiceConfig":
+        if not self.url.startswith(("http://", "https://")):
+            raise ValueError("data_service.url requires an http(s) URL")
+        if self.credential_env and not self.credential_env.replace("_", "").isalnum():
+            raise ValueError("data_service.credential_env must be an environment variable name")
         return self
 
 
 class DataConfig(BaseModel):
+    service: DataServiceConfig | None = None
     fixtures: list[FixtureConfig] = Field(default_factory=list)
     # 参考数据集（ground truth）：仅断言引擎比对时读取，不暴露给被测 agent（不进 adapter/提示词）。
     # 独立块是为了避免标准答案泄露——参考数据与输入数据同列表会被拼进 agent 可见数据集。
@@ -52,10 +66,19 @@ class DataConfig(BaseModel):
 class MCPServerConfig(BaseModel):
     id: str
     name: str
-    transport: str
-    # mock/stdio 不需要远程地址；sse/http 必须填（adapter 连接时校验）
-    url: str = ""
+    transport: Literal["sse", "http"]
+    # 正式 5B 运行只接受网络 MCP；认证只能通过环境变量引用注入。
+    url: str
+    credential_env: str | None = None
     required: bool = True
+
+    @model_validator(mode="after")
+    def _check_network_endpoint(self) -> "MCPServerConfig":
+        if not self.url.startswith(("http://", "https://")):
+            raise ValueError(f"MCP server {self.id}: transport={self.transport} requires an http(s) url")
+        if self.credential_env and not self.credential_env.replace("_", "").isalnum():
+            raise ValueError(f"MCP server {self.id}: credential_env must be an environment variable name")
+        return self
 
 
 class ToolRef(BaseModel):

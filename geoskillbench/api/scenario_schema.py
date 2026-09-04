@@ -70,14 +70,14 @@ ASSERTION_TYPES: list[dict] = [
     {
         "value": "result_dataset_exists",
         "label": "结果数据集存在",
-        "modes": ["agent_skill_test"],
+        "modes": ["agent_skill_test", "agent_test"],
         "category": "process",
         "fields": [{"key": "alias", "label": "数据集别名", "type": "text"}],
     },
     {
         "value": "result_geometry_type_in",
         "label": "结果几何类型",
-        "modes": ["agent_skill_test"],
+        "modes": ["agent_skill_test", "agent_test"],
         "category": "process",
         "fields": [
             {"key": "target", "label": "数据集别名", "type": "text"},
@@ -118,7 +118,7 @@ ASSERTION_TYPES: list[dict] = [
     {
         "value": "result_overlap_ratio",
         "label": "结果空间重合度（对比参考）",
-        "modes": ["agent_skill_test"],
+        "modes": ["agent_skill_test", "agent_test"],
         "category": "result",
         "fields": [
             {"key": "reference", "label": "参考数据集名称", "type": "text", "source": "reference", "help": "必须是 data.reference 里注册的参考数据集"},
@@ -128,7 +128,7 @@ ASSERTION_TYPES: list[dict] = [
     {
         "value": "result_area_error_max",
         "label": "结果面积误差（对比参考）",
-        "modes": ["agent_skill_test"],
+        "modes": ["agent_skill_test", "agent_test"],
         "category": "result",
         "fields": [
             {"key": "reference", "label": "参考数据集名称", "type": "text", "source": "reference", "help": "必须是 data.reference 里注册的参考数据集"},
@@ -138,7 +138,7 @@ ASSERTION_TYPES: list[dict] = [
     {
         "value": "result_distance_max",
         "label": "结果空间偏移（Hausdorff）",
-        "modes": ["agent_skill_test"],
+        "modes": ["agent_skill_test", "agent_test"],
         "category": "result",
         "fields": [
             {"key": "reference", "label": "参考数据集名称", "type": "text", "source": "reference", "help": "必须是 data.reference 里注册的参考数据集"},
@@ -148,7 +148,7 @@ ASSERTION_TYPES: list[dict] = [
     {
         "value": "result_fields_match",
         "label": "结果字段匹配（对比参考）",
-        "modes": ["agent_skill_test"],
+        "modes": ["agent_skill_test", "agent_test"],
         "category": "result",
         "fields": [
             {"key": "reference", "label": "参考数据集名称", "type": "text", "source": "reference", "help": "必须是 data.reference 里注册的参考数据集"},
@@ -158,7 +158,7 @@ ASSERTION_TYPES: list[dict] = [
     {
         "value": "result_feature_count",
         "label": "结果要素数",
-        "modes": ["agent_skill_test"],
+        "modes": ["agent_skill_test", "agent_test"],
         "category": "result",
         "fields": [
             {"key": "reference", "label": "参考数据集名称", "type": "text", "source": "reference", "help": "必须是 data.reference 里注册的参考数据集"},
@@ -239,31 +239,24 @@ FORM_SCHEMA: list[dict] = [
     },
     {
         "key": "data",
-        "label": "数据源 · skill 模式",
-        "modes": ["agent_skill_test"],
+        "label": "数据源",
+        "modes": ["agent_skill_test", "agent_test"],
         "list": {
             "key": "fixtures",
-            "label": "输入数据集（skill 操作对象，agent 可见）",
+            "label": "输入数据集（仅 skill 模式：操作对象，agent 可见）",
             "row_label": "输入数据集",
+            "modes": ["agent_skill_test"],
             "fields": [
                 {"key": "id", "label": "ID", "type": "text", "required": True, "default": ""},
                 {"key": "name", "label": "名称", "type": "text", "default": ""},
-                {
-                    "key": "type",
-                    "label": "类型",
-                    "type": "select",
-                    "default": "vector",
-                    "options": [
-                        {"value": "vector", "label": "vector"},
-                        {"value": "raster", "label": "raster"},
-                    ],
-                },
+                {"key": "catalog_id", "label": "目录 ID", "type": "text", "default": "", "help": "5B 服务端输入数据逻辑 ID；有此项则不必再填本地 path"},
                 {
                     "key": "format",
-                    "label": "格式",
+                    "label": "格式（本地遗留）",
                     "type": "select",
-                    "default": "geojson",
+                    "default": "",
                     "options": [
+                        {"value": "", "label": "（服务端引用 / 不填）"},
                         {"value": "geojson", "label": "geojson"},
                         {"value": "shapefile", "label": "shapefile"},
                         {"value": "geopackage", "label": "geopackage"},
@@ -271,35 +264,20 @@ FORM_SCHEMA: list[dict] = [
                         {"value": "db_table", "label": "db_table · PostGIS 表"},
                     ],
                 },
-                {"key": "path", "label": "路径", "type": "text", "default": "", "help": "本地文件相对 scenarios/ 目录（format 非 db_table 时必填），如 ../fixtures/schools.geojson"},
+                {"key": "path", "label": "本地路径（遗留）", "type": "text", "default": "", "help": "仅尚未迁移的本地文件；5B 用 catalog_id"},
                 {"key": "table", "label": "数据库表名（format=db_table）", "type": "text", "default": ""},
-                {"key": "db_url", "label": "数据库连接（可选，默认 DATABASE_URL）", "type": "text", "default": ""},
-                {"key": "crs", "label": "CRS", "type": "text", "default": "EPSG:4326"},
             ],
         },
         "reference_list": {
             "key": "reference",
-            "label": "参考数据集（结果比对的 ground truth，仅断言读取，不暴露给 agent）",
+            "label": "参考数据集（ground truth，仅断言读取，不暴露给 agent）",
             "row_label": "参考数据集",
             "fields": [
                 {"key": "id", "label": "ID", "type": "text", "required": True, "default": ""},
                 {"key": "name", "label": "名称", "type": "text", "default": ""},
-                {
-                    "key": "format",
-                    "label": "格式",
-                    "type": "select",
-                    "default": "geojson",
-                    "options": [
-                        {"value": "geojson", "label": "geojson"},
-                        {"value": "shapefile", "label": "shapefile"},
-                        {"value": "geopackage", "label": "geopackage"},
-                        {"value": "db_table", "label": "db_table · PostGIS 表"},
-                    ],
-                },
-                {"key": "path", "label": "路径", "type": "text", "default": "", "help": "本地文件相对 scenarios/ 目录（format 非 db_table 时必填），如 ../fixtures/expected_buffer_school_500m.geojson"},
-                {"key": "table", "label": "数据库表名（format=db_table）", "type": "text", "default": ""},
-                {"key": "db_url", "label": "数据库连接（可选，默认 DATABASE_URL）", "type": "text", "default": ""},
-                {"key": "crs", "label": "CRS", "type": "text", "default": "EPSG:4326"},
+                {"key": "evaluation_id", "label": "评测数据 ID", "type": "text", "default": "", "help": "5B 评测库 ground truth 逻辑 ID；外部 agent 场景优先填这个，不必配输入文件"},
+                {"key": "path", "label": "本地路径（遗留）", "type": "text", "default": "", "help": "仅尚未迁移的本地参考文件"},
+                {"key": "table", "label": "数据库表名（遗留 db_table）", "type": "text", "default": ""},
             ],
         },
     },

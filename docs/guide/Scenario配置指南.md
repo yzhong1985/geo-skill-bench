@@ -12,7 +12,7 @@
 | 两种编辑方式 | 前端表单（常用字段，保存为 `scenarios/<id>.yml`）/ 手写 yml（全量字段） |
 | 校验与运行 | `python -m geoskillbench.cli validate scenarios/xx.yml` / 前端 Validate+Create Task |
 
-**模式决定配置块**：skill 模式需要 `skill` + `data.fixtures`（输入数据集，可配 `data.reference` 参考数据集）；agent 模式需要 `agent`（含 `user_*` 模拟用户设定，skill 模式也可配）。公共块两种模式都有。
+**模式决定配置块**：skill 模式需要 `skill`，输入用 `data.fixtures`（`catalog_id` 或遗留 path）；两种模式都可配 `data.reference`（ground truth，仅断言读取）。agent 模式需要 `agent`（含 `user_*`），**不必配输入文件**——外部 agent 自己选数据，平台只备 `evaluation_id` 参考表做 `result_*` 库内比对。
 
 ## 2. 文件结构总览
 
@@ -28,9 +28,9 @@ runtime:              # 公共
   agent_model: rule-based-agent   # 本地 agent 模型（models.yaml 别名）
   max_turns: 6
   timeout_seconds: 180
-data:                 # 仅 skill 模式
-  fixtures: [ ... ]   # 输入数据集（agent 可见）
-  reference: [ ... ]  # 参考数据集（结果比对 ground truth，仅断言读取，不暴露给 agent）
+data:
+  fixtures: [ ... ]   # 输入数据集（skill 模式；agent 模式通常省略）
+  reference: [ ... ]  # 参考数据集（ground truth，仅断言读取；agent 模式用 evaluation_id）
 skill:                # 仅 skill 模式
   path, load_mode, ...
 agent:                # agent 模式必填；skill 模式可配 user_*（模拟用户）
@@ -186,7 +186,26 @@ data:
       db_schema: public       # 缺省 public
 ```
 
-拉取时按 `geometry_columns` 取几何列与 SRID，落到本地临时文件供比对，**run 结束时由 cleanup 删除**（不进报告产物）。可参考 `scenarios/buffer_school_500m_reference_db_001.yml`。
+拉取时按 `geometry_columns` 取几何列与 SRID，落到本地临时文件供比对，**run 结束时由 cleanup 删除**（不进报告产物）。可参考 `scenarios/buffer_school_500m_reference_db_001.yml`。正式 5B / 外部 agent 评测优先用 `evaluation_id`，不要再配本地 path。
+
+### 5.3 外部 agent 场景的参考数据
+
+`type: agent_test` **不需要** `data.fixtures`（输入由外部 agent 自己选）。要做 `result_*` 时只配 `data.reference`：
+
+```yaml
+type: agent_test
+data:
+  reference:
+    - id: expected_buffer
+      evaluation_id: tmp_createBuffer_260828150924737   # 评测库 ground truth 逻辑表
+assertions:
+  - type: result_overlap_ratio
+    target: buffer_result          # HTTP tool_event 登记的默认别名
+    reference: expected_buffer
+    min: 0.9
+```
+
+前提：外部 agent SSE `tool_event` 带 SuperMap 结果字段（`tableName` / `bufferResult`），平台登记后走 PostGIS 库内比对（`GEO_EVAL_DATABASE_URL`）。没有 GIS 产出则 `result_*` 失败，不影响纯文字场景。
 
 ## 6. agent 模式专属字段（`type: agent_test`）
 
@@ -289,11 +308,11 @@ agent:
 | `skill_reference_loaded_before_tool` | `reference, tool` | 引用加载先于某工具调用 |
 | `skill_reference_load_count_less_than` | `value` | 引用加载次数上限 |
 
-> **结果内容断言（`result_*`）说明**：把评测从"过程对不对"升级到"结果对不对"。比对的是**真实几何内容**，报告断言行会带 **`实际 X / 预期 Y`** 标注。需要：
-> 1. 结果数据集有真实落盘几何（当前 mock 工具会真实计算并写 GeoJSON）；
-> 2. `reference` 参考数据集在 `data.reference` 里注册一个 fixture（如 `expected_buffer`，本地文件或 `db_table`），作为 ground truth。参考数据是独立块，**不暴露给被测 agent**（仅断言引擎比对时读取）。
+> **结果内容断言（`result_*`）说明**：把评测从"过程对不对"升级到"结果对不对"。比对的是**真实几何内容**，报告断言行会带 **`实际 X / 预期 Y`** 和后端标记（`[file]` / `[postgis]`）。需要：
+> 1. 结果数据集可定位：本地 path，或 adapter 内部表名 + 参考 `evaluation_id`/`catalog_id`（`GEO_EVAL_DATABASE_URL` 指向评测库，不是报告库 `DATABASE_URL`）；
+> 2. `reference` 参考数据集在 `data.reference` 里注册一个 fixture（如 `expected_buffer`），作为 ground truth。参考数据是独立块，**不暴露给被测 agent**（仅断言引擎比对时读取）。
 > 结果数据集别名（`target`）**可省略**，缺省为 `buffer_result`（skill 流里 `create_buffer` 的默认产出别名）；若 skill 产出的数据集别名不同（如工具自定义了 `output_alias`），用 `target: <别名>` 显式指定。
-> 面积/偏移先自动对齐到参考中心点选定的 UTM 带（米制），避免 4326 平方度、3857 纬度变形；结果与参考 CRS 不同也能比。参考建议用独立工具（真实 GIS/PostGIS）生成，避免与 mock 同源算法造成假阳性。可参考示例场景 `scenarios/buffer_school_500m_reference_001.yml` 与生成脚本 `scripts/generate_reference_buffer.py`。
+> 面积/偏移先自动对齐到参考中心点选定的 UTM 带（米制），避免 4326 平方度、3857 纬度变形；结果与参考 CRS 不同也能比。库内路径始终对整表 `ST_Union`，不按 `smid` 取单行。参考建议用独立工具（真实 GIS/PostGIS）生成，避免与 mock 同源算法造成假阳性。可参考示例场景 `scenarios/buffer_school_500m_reference_001.yml`、`scenarios/buffer_school_500m_5b_001.yml` 与生成脚本 `scripts/generate_reference_buffer.py`。
 
 ## 11. 完整示例
 

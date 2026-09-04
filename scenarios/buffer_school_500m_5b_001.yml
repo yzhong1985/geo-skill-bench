@@ -1,0 +1,87 @@
+id: buffer_school_500m_5b_001
+name: 学校周边 500 米缓冲区分析（5B 网络 MCP 与真实服务）
+version: 1.0.0
+type: agent_skill_test
+description: >
+  使用真实 AgentX/SuperMap VectorAnalyst 网络 SSE MCP 服务，
+  基于真实数据集 agentx_gpa_demo_sdx_school 执行 500 米缓冲区分析。
+target:
+  skill_id: gis_buffer_analysis
+  skill_version: 1.0.0
+runtime:
+  executor: skill
+  agent_model: rule-based-agent
+  max_turns: 6
+  timeout_seconds: 180
+  memory_enabled: false
+data:
+  fixtures:
+    - id: agentx_gpa_demo_sdx_school
+      catalog_id: agentx_gpa_demo_sdx_school
+  reference:
+    - id: expected_buffer
+      evaluation_id: tmp_createBuffer_260828150924737
+mcp:
+  servers:
+    - id: vectoranalyst
+      name: SuperMap 矢量分析 MCP 服务
+      transport: sse
+      url: http://192.168.13.130:8490/agentx/workflow/api/gpamcp/vectoranalyst/sse/v2.1
+      required: true
+  tools:
+    required:
+      - server: vectoranalyst
+        name: createBuffer
+skill:
+  load_mode: file
+  path: ../skills/gis_buffer_analysis.skill.yml
+  required: true
+user_task: >
+  请使用 agentx_gpa_demo_sdx_school 数据生成 500 米缓冲区分析服务范围。
+agent:
+  user_enabled: true
+  user_profile: normal_user
+  user_max_turns: 5
+  user_goal: >
+    如果智能体询问使用哪个数据，请回答使用 agentx_gpa_demo_sdx_school 数据。
+    如果智能体询问缓冲距离，请回答 500 米。
+    不要主动提供未被询问的信息。
+  user_model: rule-based-user
+expected_behavior:
+  should_load_skills:
+    - gis_buffer_analysis
+  should_call_tools:
+    - createBuffer
+assertions:
+  - type: skill_loaded
+    skill_id: gis_buffer_analysis
+  - type: tool_called
+    tool: createBuffer
+  - type: tool_argument_equals
+    tool: createBuffer
+    argument: bufferDistance
+    value: "500"
+  - type: result_dataset_exists
+    alias: buffer_result
+  - type: result_overlap_ratio
+    target: buffer_result
+    reference: expected_buffer
+    min: 0.9
+  - type: result_area_error_max
+    target: buffer_result
+    reference: expected_buffer
+    max_ratio: 0.05
+  - type: result_feature_count
+    target: buffer_result
+    reference: expected_buffer
+    count: 1
+  - type: final_response_contains
+    values:
+      - "500"
+      - "缓冲区"
+judge:
+  enabled: true
+  rubric:
+    - 是否正确识别为缓冲区分析任务
+    - 是否加载了 gis_buffer_analysis skill
+    - 是否正确调用 createBuffer 工具

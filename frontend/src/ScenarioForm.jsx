@@ -398,11 +398,20 @@ function TextListEditor({ listDef, items, onChange }) {
   );
 }
 
-// fixture 行 → yml 提交对象：只保留填了 ID 且（本地文件有 path / db_table 有 table）的行；
-// 空值字段剔除（crs 等留空时后端自动识别）
+function fixtureRowHasSource(row) {
+  if (!row.id?.trim()) return false;
+  return Boolean(
+    row.evaluation_id?.trim() ||
+    row.catalog_id?.trim() ||
+    row.table?.trim() ||
+    row.path?.trim()
+  );
+}
+
+// fixture 行 → yml：ID + evaluation_id / catalog_id / table / path 之一
 function cleanFixtureRows(rows) {
   return rows
-    .filter((row) => row.id?.trim() && (row.format === "db_table" ? row.table?.trim() : row.path?.trim()))
+    .filter((row) => fixtureRowHasSource(row))
     .map((row) => {
       const clean = {};
       for (const [k, v] of Object.entries(row)) {
@@ -508,17 +517,14 @@ export default function ScenarioForm({ onClose, onSaved }) {
         if (empty) missing.push(field.label);
       }
     }
-    if (type === "agent_skill_test") {
+    if (type === "agent_skill_test" || type === "agent_test") {
       const invalidRow = (rows, label) => {
         if (rows.length === 0) return false;
-        const bad = rows.some((row) => {
-          if (!row.id?.trim()) return true;
-          return row.format === "db_table" ? !row.table?.trim() : !row.path?.trim();
-        });
-        if (bad) missing.push(`${label}（每行 ID 必填；本地文件需路径，db_table 需表名）`);
+        const bad = rows.some((row) => row.id?.trim() && !fixtureRowHasSource(row));
+        if (bad) missing.push(`${label}（每行 ID 必填，且需 evaluation_id / catalog_id / 表名 / 路径之一）`);
         return bad;
       };
-      invalidRow(fixtures, "输入数据集");
+      if (type === "agent_skill_test") invalidRow(fixtures, "输入数据集");
       invalidRow(referenceFixtures, "参考数据集");
     }
     return missing;
@@ -547,15 +553,14 @@ export default function ScenarioForm({ onClose, onSaved }) {
         payload[key] = out;
       }
     }
-    // fixtures 行（输入数据）+ reference 行（参考数据，ground truth）：分开写 data.fixtures / data.reference
+    const dataBlock = {};
     if (type === "agent_skill_test") {
-      const dataBlock = {};
       const inputRows = cleanFixtureRows(fixtures);
       if (inputRows.length > 0) dataBlock.fixtures = inputRows;
-      const referenceRows = cleanFixtureRows(referenceFixtures);
-      if (referenceRows.length > 0) dataBlock.reference = referenceRows;
-      if (Object.keys(dataBlock).length > 0) blocks.data = dataBlock;
     }
+    const referenceRows = cleanFixtureRows(referenceFixtures);
+    if (referenceRows.length > 0) dataBlock.reference = referenceRows;
+    if (Object.keys(dataBlock).length > 0) blocks.data = dataBlock;
     // MCP servers：skill 模式下从编辑器行组装（工具授权层已取消，不生成 mcp.tools）
     if (type === "agent_skill_test") {
       const serverRows = cleanMcpServersRows(mcpServers);
@@ -665,9 +670,11 @@ export default function ScenarioForm({ onClose, onSaved }) {
               }}
             />
           ))}
-          {group.key === "data" && group.list && (
+          {group.key === "data" && (
             <>
-              <FixtureEditor listDef={group.list} fixtures={fixtures} onChange={setFixtures} />
+              {group.list && (!group.list.modes || group.list.modes.includes(type)) && (
+                <FixtureEditor listDef={group.list} fixtures={fixtures} onChange={setFixtures} />
+              )}
               {group.reference_list && (
                 <FixtureEditor
                   listDef={group.reference_list}
@@ -695,26 +702,24 @@ export default function ScenarioForm({ onClose, onSaved }) {
                   onChange={setProcessAssertions}
                 />
               )}
-              {type === "agent_skill_test" && (
-                <>
-                  <DefaultSwitch
-                    switchDef={group.result_switch}
-                    checked={useResultAssertions}
-                    onChange={setUseResultAssertions}
+              <>
+                <DefaultSwitch
+                  switchDef={group.result_switch}
+                  checked={useResultAssertions}
+                  onChange={setUseResultAssertions}
+                />
+                {useResultAssertions && (
+                  <AssertionEditor
+                    listDef={group.result_list}
+                    mode={type}
+                    assertions={resultAssertions}
+                    onChange={setResultAssertions}
+                    fixtureOptions={referenceFixtures
+                      .filter((f) => f.id?.trim())
+                      .map((f) => ({ value: f.id.trim(), label: f.name?.trim() || f.id.trim() }))}
                   />
-                  {useResultAssertions && (
-                    <AssertionEditor
-                      listDef={group.result_list}
-                      mode={type}
-                      assertions={resultAssertions}
-                      onChange={setResultAssertions}
-                      fixtureOptions={referenceFixtures
-                        .filter((f) => f.id?.trim())
-                        .map((f) => ({ value: f.id.trim(), label: f.name?.trim() || f.id.trim() }))}
-                    />
-                  )}
-                </>
-              )}
+                )}
+              </>
             </>
           )}
           {group.key === "judge" && (

@@ -80,7 +80,7 @@ agent:
    - body = `agent.body` 副本，注入 `input_value=message`；已有 session_id 则注入。
    - `POST endpoint`（params=`query_params`，headers，json=body，timeout）。
    - 非流式：解析 JSON → 从 `outputs` 提取文本 → 保存响应中的新 `session_id`（不解析工具调用）。
-   - 流式：按 SSE 聚合文本增量，同时把 `tool_event` 解析为 `tool_calls`；**流关闭 = 完成**。
+   - 流式：按 SSE 聚合文本增量，同时把 `tool_event` 解析为 `tool_calls`；GIS 工具产出（`tableName` / `bufferResult`）经 adapter 登记为不透明 handle，物理表名只留内部 locator 供 `result_*` 库内比对；非 GIS 产出原样保留。**流关闭 = 完成**。
    - 返回 `ExecutorStepResult(response=..., finished=True, need_interaction=False, tool_calls=<解析出的工具调用，无上报则为空>)`。
 3. **close_session**：清理会话状态。
 

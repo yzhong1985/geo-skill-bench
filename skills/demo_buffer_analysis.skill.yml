@@ -1,0 +1,26 @@
+id: demo_buffer_analysis
+name: 演示-缓冲区分析技能（本地 mock 工具版）
+version: 1.0.0
+type: prompt_skill
+description: >
+  批次能力演示用技能：流程与 gis_buffer_analysis 相同，
+  工具名使用本地 mock server 提供的 create_buffer。
+when_to_use: >
+  当用户要求分析某类空间对象周边一定距离范围、服务范围时使用。
+required_inputs:
+  - input_dataset
+  - buffer_distance
+optional_inputs: []
+recommended_mcp_tools:
+  - create_buffer
+instructions: |
+  你是一个 GIS 缓冲区分析专家。
+  1. 确认输入数据集名称与缓冲距离。
+  2. 调用 create_buffer 工具（参数：dataset、distance）。
+  3. 返回结果数据句柄，并说明分析距离与结果含义。
+tool_sequence:
+  - create_buffer
+expected_outputs:
+  - result_dataset_handle
+common_failures:
+  - 未确认缓冲距离

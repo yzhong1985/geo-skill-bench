@@ -28,13 +28,13 @@ mcp:
   servers:
     - id: gpa_vector
       name: GPA 矢量分析 MCP 服务
-      transport: mock
-      url: mock://vector
+      transport: http
+      url: http://127.0.0.1:8765/mcp
       required: true
     - id: metadata
       name: 空间元数据 MCP 服务
-      transport: mock
-      url: mock://metadata
+      transport: http
+      url: http://127.0.0.1:8765/mcp
       required: true
   tools:
     required:

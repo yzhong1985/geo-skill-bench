@@ -1,42 +1,42 @@
-id: buffer_school_500m_001
-name: 学校周边 500 米缓冲区分析
+id: buffer_school_500m_reference_db_001
+name: 学校周边 500 米缓冲区分析（参考来自 PostGIS 表）
 version: 1.0.0
 type: agent_skill_test
 description: >
-  测试 gis_buffer_analysis 技能是否能够引导智能体正确调用 MCP 工具，
-  完成学校点数据的 500 米缓冲区分析。
+  与 buffer_school_500m_reference_001 相同，但参考数据集从 PostGIS 表拉取
+  （format: db_table），验证结果比对 + DB 拉取数据在 cleanup 时删除。
 target:
   skill_id: gis_buffer_analysis
   skill_version: 1.0.0
 runtime:
-  executor: skill          # 历史别名 langgraph 仍兼容
+  executor: skill
   agent_model: rule-based-agent
   max_turns: 6
   timeout_seconds: 180
   memory_enabled: false
 data:
   fixtures:
+    # 输入数据：只需 id + path，其余自动从文件识别
     - id: schools
-      name: 学校点数据
-      type: vector
-      format: geojson
       path: ../fixtures/schools.geojson
-      crs: EPSG:4326
-      geometry_type: Point
-      import_as: dataset
-      register_metadata: true
-      cleanup: true
+  reference:
+    # 参考数据：从 PostGIS 表拉取（仅断言读取，不暴露给 agent；db_url 缺省回落 DATABASE_URL）
+    - id: expected_buffer
+      type: vector
+      format: db_table
+      db_url: postgresql+psycopg://geo:geo@localhost:5433/geoskillbench
+      table: expected_buffer
 mcp:
   servers:
     - id: gpa_vector
       name: GPA 矢量分析 MCP 服务
-      transport: mock
-      url: mock://vector
+      transport: http
+      url: http://127.0.0.1:8765/mcp
       required: true
     - id: metadata
       name: 空间元数据 MCP 服务
-      transport: mock
-      url: mock://metadata
+      transport: http
+      url: http://127.0.0.1:8765/mcp
       required: true
   tools:
     required:
@@ -55,7 +55,6 @@ skill:
   required: true
 user_task: >
   请帮我生成 schools 数据周边 500 米的服务范围。
-# 模拟用户设定（反问闭环）：被测 skill agent 缺信息反问时，UserSimulator 按 user_goal 回答
 agent:
   user_enabled: true
   user_profile: normal_user
@@ -80,45 +79,28 @@ expected_behavior:
     - 编造不存在的数据字段
     - 在缺少输入数据时直接执行
 assertions:
-  - type: skill_loaded
-    skill_id: gis_buffer_analysis
-  - type: tool_available
-    tool: query_dataset_metadata
-  - type: tool_available
-    tool: create_buffer
-  - type: tool_called
-    tool: query_dataset_metadata
-  - type: tool_called
-    tool: create_buffer
-  - type: tool_sequence
-    sequence:
-      - query_dataset_metadata
-      - create_buffer
-  - type: tool_argument_equals
-    tool: create_buffer
-    argument: distance
-    value: 500
-  - type: result_dataset_exists
-    alias: buffer_result
-  - type: result_geometry_type_in
+  - type: result_overlap_ratio
     target: buffer_result
-    values:
-      - Polygon
-      - MultiPolygon
-  - type: final_response_contains
-    values:
-      - "500"
-      - "缓冲区"
-      - "结果数据"
+    reference: expected_buffer
+    min: 0.9
+  - type: result_area_error_max
+    target: buffer_result
+    reference: expected_buffer
+    max_ratio: 0.05
+  - type: result_distance_max
+    target: buffer_result
+    reference: expected_buffer
+    max_meters: 20
+  - type: result_fields_match
+    target: buffer_result
+    reference: expected_buffer
+    mode: contains
+  - type: result_feature_count
+    target: buffer_result
+    reference: expected_buffer
+    count: 2
 judge:
   enabled: true
-  rubric:
-    - 是否正确识别为缓冲区分析任务
-    - 是否加载了 gis_buffer_analysis skill
-    - 是否正确使用 schools 数据
-    - 是否正确调用 query_dataset_metadata 和 create_buffer
-    - 是否合理处理 EPSG:4326 与米级缓冲问题
-    - 最终回答是否包含结果数据句柄、缓冲距离和简要说明
 pass_criteria:
   required_assertions_passed: true
   judge_score_min: 0.8

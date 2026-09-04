@@ -196,12 +196,15 @@ class HttpAgentExecutor(Executor):
                     if isinstance(parsed, dict):
                         output = parsed
                 except json.JSONDecodeError:
-                    pass  # 非 JSON 字符串，保持原样
+                    pass
+            public = output if isinstance(output, dict) else None
+            if public is not None:
+                public = self.adapter.register_result_payload(public)
             calls.append(
                 ToolCallRecord(
                     tool_name=tool_name,
                     arguments=arguments,
-                    result=output if isinstance(output, dict) else None,
+                    result=public,
                     status="success",
                 )
             )

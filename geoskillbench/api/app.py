@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -7,12 +8,15 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from typing import Any
+
 from pydantic import BaseModel, ValidationError
 import yaml
 
 from geoskillbench.api.task_manager import TaskManager
 from geoskillbench.executors.skill_executor import SkillExecutor
 from geoskillbench.executors.nanobot_executor import NanobotExecutor
+from geoskillbench.models.batch import BatchRequest
 from geoskillbench.models.scenario import Scenario, SkillConfig
 from geoskillbench.mcp.mcp_tool_adapter import MCPToolAdapter
 from geoskillbench.runner import TestRunner
@@ -81,7 +85,7 @@ def _runner() -> TestRunner:
 def _scenario_listing() -> list[dict]:
     runner = _runner()
     items: list[dict] = []
-    for path in sorted(SCENARIOS_DIR.rglob("*.yml")):
+    for path in sorted(SCENARIOS_DIR.glob("*.yml")):
         try:
             scenario = runner.scenario_loader.load(str(path))
             items.append(
@@ -458,27 +462,70 @@ async def stream_task_events(task_id: str):
 @app.get("/api/reports")
 def list_reports() -> list[dict]:
     reports: list[dict] = []
-    json_dir = REPORTS_DIR / "json"
-    markdown_dir = REPORTS_DIR / "markdown"
-    for path in sorted(json_dir.glob("*.json")):
-        reports.append(
-            {
-                "scenario_id": path.stem,
-                "json_path": str(path.relative_to(ROOT_DIR)),
-                "markdown_path": str((markdown_dir / f"{path.stem}.md").relative_to(ROOT_DIR)),
-            }
-        )
+    # 优先扫描 runs/ 目录
+    runs_dir = REPORTS_DIR / "runs"
+    if runs_dir.exists():
+        for run_path in sorted(runs_dir.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
+            if run_path.is_dir() and (run_path / "result.json").exists():
+                json_file = run_path / "result.json"
+                md_file = run_path / "report.md"
+                scenario_id = ""
+                try:
+                    data = json.loads(json_file.read_text(encoding="utf-8"))
+                    scenario_id = data.get("scenario_id", run_path.name)
+                except Exception:
+                    scenario_id = run_path.name
+                reports.append(
+                    {
+                        "run_id": run_path.name,
+                        "scenario_id": scenario_id,
+                        "json_path": str(json_file.relative_to(ROOT_DIR)),
+                        "markdown_path": str(md_file.relative_to(ROOT_DIR)) if md_file.exists() else "",
+                    }
+                )
+    # 若 runs 为空，兼容回退读取 legacy json/ 目录
+    if not reports:
+        json_dir = REPORTS_DIR / "json"
+        markdown_dir = REPORTS_DIR / "markdown"
+        for path in sorted(json_dir.glob("*.json")):
+            reports.append(
+                {
+                    "run_id": path.stem,
+                    "scenario_id": path.stem,
+                    "json_path": str(path.relative_to(ROOT_DIR)),
+                    "markdown_path": str((markdown_dir / f"{path.stem}.md").relative_to(ROOT_DIR)),
+                }
+            )
     return reports
 
 
-@app.get("/api/reports/{scenario_id}")
-def get_report(scenario_id: str) -> dict:
-    json_path = REPORTS_DIR / "json" / f"{scenario_id}.json"
-    md_path = REPORTS_DIR / "markdown" / f"{scenario_id}.md"
+@app.get("/api/reports/{scenario_or_run_id}")
+def get_report(scenario_or_run_id: str) -> dict:
+    # 1. 尝试按 run_id 查找 runs/<run_id>/
+    run_dir = REPORTS_DIR / "runs" / scenario_or_run_id
+    if run_dir.exists() and (run_dir / "result.json").exists():
+        json_path = run_dir / "result.json"
+        md_path = run_dir / "report.md"
+        scenario_id = scenario_or_run_id
+        try:
+            data = json.loads(json_path.read_text(encoding="utf-8"))
+            scenario_id = data.get("scenario_id", scenario_id)
+        except Exception:
+            pass
+        return {
+            "run_id": scenario_or_run_id,
+            "scenario_id": scenario_id,
+            "json": json_path.read_text(encoding="utf-8"),
+            "markdown": md_path.read_text(encoding="utf-8") if md_path.exists() else "",
+        }
+
+    # 2. 尝试按 legacy scenario_id 查找
+    json_path = REPORTS_DIR / "json" / f"{scenario_or_run_id}.json"
+    md_path = REPORTS_DIR / "markdown" / f"{scenario_or_run_id}.md"
     if not json_path.exists():
-        raise HTTPException(status_code=404, detail=f"Report not found for scenario {scenario_id}")
+        raise HTTPException(status_code=404, detail=f"Report not found for {scenario_or_run_id}")
     return {
-        "scenario_id": scenario_id,
+        "scenario_id": scenario_or_run_id,
         "json": json_path.read_text(encoding="utf-8"),
         "markdown": md_path.read_text(encoding="utf-8") if md_path.exists() else "",
     }
@@ -528,3 +575,126 @@ def get_run(run_id: str) -> dict:
     if row is None:
         raise HTTPException(status_code=404, detail=f"Run not found: {run_id}")
     return row
+
+
+# ---------- 迭代 6：Batch API 控制面 ----------
+
+@app.post("/api/batches")
+async def create_batch(request: BatchRequest) -> dict:
+    """创建并启动批次/重复评测任务。"""
+    if not request.scenarios:
+        raise HTTPException(status_code=400, detail="scenarios 不能为空")
+    for s in request.scenarios:
+        sc_path = ROOT_DIR / s if not Path(s).is_absolute() else Path(s)
+        if not sc_path.exists():
+            raise HTTPException(status_code=404, detail=f"Scenario 不存在: {s}")
+    batch_task = await task_manager.create_batch_task(request)
+    return batch_task.snapshot()
+
+
+@app.get("/api/batches")
+def list_batches() -> dict:
+    """查询批次列表：优先从 DB 读取历史，合并内存中正在运行的 batch。"""
+    from geoskillbench.api import db
+
+    memory_batches = task_manager.list_batch_tasks()
+    memory_ids = {b["batch_id"] for b in memory_batches}
+    db_batches = []
+    try:
+        db_batches = db.list_batches()
+    except Exception:
+        pass
+    combined = list(memory_batches)
+    for b in db_batches:
+        if b["batch_id"] not in memory_ids:
+            combined.append(b)
+    return {"available": True, "batches": combined}
+
+
+@app.get("/api/batches/{batch_id}")
+def get_batch(batch_id: str) -> dict:
+    """查询单批次详情。"""
+    from geoskillbench.api import db
+
+    task = task_manager.get_batch_task(batch_id)
+    if task is not None:
+        return task.snapshot()
+    try:
+        row = db.get_batch(batch_id)
+        if row is not None:
+            return row
+    except Exception:
+        pass
+    # 尝试从文件系统读取 reports/batches/<batch_id>/summary.json
+    batch_summary_file = REPORTS_DIR / "batches" / batch_id / "summary.json"
+    if batch_summary_file.exists():
+        try:
+            return json.loads(batch_summary_file.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    raise HTTPException(status_code=404, detail=f"Batch not found: {batch_id}")
+
+
+@app.get("/api/batches/{batch_id}/events")
+async def stream_batch_events(batch_id: str):
+    """SSE 实时流：订阅批次进度与子任务运行事件。"""
+    task = task_manager.get_batch_task(batch_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail=f"Batch task not found or already archived: {batch_id}")
+    return StreamingResponse(task_manager.batch_event_stream(batch_id), media_type="text/event-stream")
+
+
+# ---------- Batch AI Analyst 端点 ----------
+
+def _write_diagnostics_file(batch_id: str, diagnostics: Any) -> Path:
+    batch_dir = REPORTS_DIR / "batches" / batch_id
+    batch_dir.mkdir(parents=True, exist_ok=True)
+    diag_file = batch_dir / "ai_diagnostics.json"
+    payload = diagnostics.model_dump() if hasattr(diagnostics, "model_dump") else diagnostics
+    diag_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return diag_file
+
+
+@app.post("/api/batches/{batch_id}/analyze")
+def analyze_batch(batch_id: str, model: str | None = None) -> dict:
+    """手动触发批次横向 AI 诊断。辅助分析，不改变正式 verdict。重复调用覆盖写盘。"""
+    from geoskillbench.models.batch import BatchResult
+    from geoskillbench.runtime.batch_analyst import run_batch_ai_analyst
+
+    task = task_manager.get_batch_task(batch_id)
+    if task is not None and task.status in {"pending", "running"}:
+        raise HTTPException(status_code=409, detail=f"Batch {batch_id} is still {task.status}")
+
+    batch_dir = REPORTS_DIR / "batches" / batch_id
+    summary_file = batch_dir / "summary.json"
+    if not summary_file.exists():
+        raise HTTPException(status_code=404, detail=f"Batch {batch_id} summary not found")
+
+    try:
+        raw_data = json.loads(summary_file.read_text(encoding="utf-8"))
+        batch_result = BatchResult.model_validate(raw_data)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to read batch summary: {exc}") from exc
+
+    diagnostics = run_batch_ai_analyst(
+        batch_result,
+        model=model,
+        reports_dir=REPORTS_DIR,
+        root_dir=ROOT_DIR,
+    )
+    _write_diagnostics_file(batch_id, diagnostics)
+    if diagnostics.source == "unavailable":
+        raise HTTPException(status_code=502, detail=diagnostics.model_dump())
+    return diagnostics.model_dump()
+
+
+@app.get("/api/batches/{batch_id}/diagnostics")
+def get_batch_diagnostics(batch_id: str) -> dict:
+    """获取指定批次的 AI 诊断结果。尚未分析时 404。"""
+    diag_file = REPORTS_DIR / "batches" / batch_id / "ai_diagnostics.json"
+    if not diag_file.exists():
+        raise HTTPException(status_code=404, detail=f"Diagnostics not found for batch {batch_id}")
+    try:
+        return json.loads(diag_file.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to read diagnostics: {exc}") from exc

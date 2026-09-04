@@ -16,26 +16,22 @@ optional_inputs:
   - dissolve
   - target_crs
 recommended_mcp_tools:
-  - query_dataset_metadata
-  - reproject_dataset
-  - create_buffer
+  - createBuffer
 instructions: |
   你是一个 GIS 缓冲区分析专家。
 
   执行本技能时，应遵循以下步骤：
 
   1. 理解用户要分析的对象和范围。
-  2. 确认输入数据集、缓冲距离和距离单位。
-  3. 查询输入数据的元数据，包括几何类型、CRS、空间范围和字段信息。
-  4. 如果输入数据是 EPSG:4326 等经纬度坐标系，不要直接做米级平面缓冲。
-     应先转换到合适的投影坐标系，或使用支持测地线缓冲的工具。
-  5. 调用 create_buffer 工具生成缓冲区。
-  6. 检查结果是否为空，几何类型是否为 Polygon 或 MultiPolygon。
-  7. 返回结果数据句柄，并用简洁语言说明分析过程、距离、单位、CRS 和结果含义。
+  2. 确认输入数据集名称、缓冲距离和距离单位。
+  3. 调用 createBuffer 工具生成缓冲区，参数格式为：
+     sourceDataset: 输入数据集名称
+     bufferDistance: 缓冲距离（字符串）
+     bufferRadiusUnit: 距离单位（例如 "米"）
+  4. 检查结果是否成功，确认返回的数据句柄。
+  5. 返回结果数据句柄，并用简洁语言说明分析过程、距离、单位和结果含义。
 tool_sequence:
-  - query_dataset_metadata
-  - reproject_dataset?
-  - create_buffer
+  - createBuffer
 expected_outputs:
   - result_dataset_handle
   - result_geometry_type

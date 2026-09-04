@@ -18,6 +18,8 @@
 body {
   margin: 0;
   font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+  font-size: 16px;
+  line-height: 1.5;
   color: var(--text);
   background:
     radial-gradient(circle at top left, rgba(15, 118, 110, 0.14), transparent 32%),
@@ -35,7 +37,7 @@ pre {
   white-space: pre-wrap;
   word-break: break-word;
   font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
-  font-size: 13px;
+  font-size: 14px;
 }
 
 .app-shell {
@@ -113,7 +115,13 @@ pre {
 }
 
 .panel h2 {
-  margin-top: 0;
+  margin: 0 0 14px;
+  font-size: 1.35rem;
+}
+
+.panel h3 {
+  margin: 0 0 10px;
+  font-size: 1.05rem;
 }
 
 .field {
@@ -213,7 +221,7 @@ button:disabled {
 
 .list span {
   color: var(--muted);
-  font-size: 13px;
+  font-size: 14px;
 }
 
 .list.compact li {
@@ -263,7 +271,7 @@ button:disabled {
 
 .muted {
   color: var(--muted);
-  font-size: 13px;
+  font-size: 15px;
 }
 
 .tool-row {
@@ -282,9 +290,9 @@ button:disabled {
 .pill {
   display: inline-flex;
   align-self: flex-start;
-  padding: 2px 8px;
+  padding: 3px 10px;
   border-radius: 999px;
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 600;
   text-transform: uppercase;
 }
@@ -423,7 +431,10 @@ details.result-section summary {
   .hero,
   .meta-grid,
   .result-grid,
-  .config-grid {
+  .config-grid,
+  .stat-grid,
+  .batch-item,
+  .attribution-row {
     grid-template-columns: 1fr;
     display: grid;
   }
@@ -810,4 +821,176 @@ textarea.form-input {
 .yaml-editor:focus {
   outline: 2px solid var(--accent);
   border-color: transparent;
+}
+
+.list li.is-selected {
+  border-color: var(--accent);
+  background: rgba(15, 118, 110, 0.08);
+}
+
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 12px;
+}
+
+.stat-card {
+  margin: 0;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: #fffefb;
+  display: grid;
+  gap: 6px;
+}
+
+.stat-card dt {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  letter-spacing: 0.04em;
+}
+
+.stat-card dd {
+  margin: 0;
+  font-size: 1.35rem;
+  font-weight: 700;
+  line-height: 1.15;
+}
+
+.stat-card .stat-sub {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--muted);
+}
+
+.progress-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0 0 16px;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: rgba(15, 118, 110, 0.1);
+  color: var(--accent-strong);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.batch-list {
+  display: grid;
+  gap: 10px;
+}
+
+.batch-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px 16px;
+  align-items: center;
+}
+
+.batch-item strong {
+  font-size: 15px;
+}
+
+.batch-item-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.batch-detail {
+  margin-top: 18px;
+  display: grid;
+  gap: 16px;
+}
+
+.batch-detail h3,
+.batch-detail h4 {
+  margin: 0 0 8px;
+}
+
+.analyst-view {
+  margin-top: 4px;
+  display: grid;
+  gap: 12px;
+}
+
+.analyst-summary {
+  margin: 0;
+  font-size: 16px;
+  line-height: 1.55;
+}
+
+.attribution-list {
+  display: grid;
+  gap: 10px;
+}
+
+.attribution-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 180px) minmax(0, 1fr) 56px;
+  gap: 10px;
+  align-items: center;
+  font-size: 15px;
+}
+
+.attribution-bar {
+  height: 10px;
+  border-radius: 999px;
+  background: #e7e0d2;
+  overflow: hidden;
+}
+
+.attribution-fill {
+  height: 100%;
+  background: var(--accent);
+}
+
+.patch-card {
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  padding: 14px 16px;
+  background: #fffdf8;
+  display: grid;
+  gap: 8px;
+}
+
+.diff-block {
+  margin-top: 4px;
+  max-height: 280px;
+  overflow: auto;
+  background: #1a1b1f;
+  color: #d7f3e3;
+  border-radius: 12px;
+  padding: 14px;
+  font-size: 13px;
+}
+
+.analyst-tabs {
+  display: flex;
+  gap: 8px;
+}
+
+.repeat-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 15px;
+  color: var(--muted);
+}
+
+.repeat-field input {
+  width: 72px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: #fffefb;
+  font: inherit;
 }

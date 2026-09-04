@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import time
 import uuid
 from pathlib import Path
@@ -7,6 +8,8 @@ from typing import Any, Callable
 
 from geoskillbench.executors.factory import ExecutorFactory
 from geoskillbench.assertions.assertion_engine import AssertionEngine
+from geoskillbench.assertions.sql_result_comparator import PostgisResultComparator
+from geoskillbench.data_service import DataServiceClient, DataServiceError
 from geoskillbench.fixtures.fixture_manager import FixtureManager
 from geoskillbench.loader.scenario_loader import ScenarioLoader
 from geoskillbench.loader.skill_loader import SkillLoader
@@ -113,7 +116,10 @@ class TestRunner:
         self.fixture_manager = FixtureManager()
         self.skill_loader = SkillLoader()
         self.adapter = MCPToolAdapter()
-        self.assertion_engine = AssertionEngine()
+        self.assertion_engine = AssertionEngine(
+            sql_comparator=PostgisResultComparator.from_env(),
+            result_locator=self.adapter.get_result_location,
+        )
         self.judge_engine = JudgeEngine()
         self.report_generator = ReportGenerator()
 
@@ -162,6 +168,8 @@ class TestRunner:
         recorder = ExecutionRecorder(scenario_id=Path(scenario_path).stem)
         test_context = None
         scenario = None
+        registration = None
+        data_service = None
         executor = None
         session = None
 
@@ -179,7 +187,19 @@ class TestRunner:
 
             stage_results["PREPARE_DATA"] = "RUNNING"
             emit("stage", stage="PREPARE_DATA", status="RUNNING", stage_results=dict(stage_results))
-            datasets, reference_datasets = self.fixture_manager.prepare(scenario)
+            if scenario.data.service:
+                token = os.environ.get(scenario.data.service.credential_env, "") if scenario.data.service.credential_env else None
+                data_service = DataServiceClient(scenario.data.service.url, token=token, timeout=scenario.data.service.timeout_seconds)
+                logical_inputs = [fixture.catalog_id for fixture in scenario.data.fixtures if fixture.catalog_id]
+                logical_references = [fixture.evaluation_id for fixture in scenario.data.reference if fixture.evaluation_id]
+                registration = data_service.register_run(
+                    run_id,
+                    scenario_id=scenario.id,
+                    inputs=logical_inputs,
+                    references=logical_references,
+                    idempotency_key=run_id,
+                )
+            datasets, reference_datasets = self.fixture_manager.prepare(scenario, registration)
             stage_results["PREPARE_DATA"] = "PASSED"
             emit("stage", stage="PREPARE_DATA", status="PASSED", stage_results=dict(stage_results))
 
@@ -187,7 +207,7 @@ class TestRunner:
             emit("stage", stage="CONNECT_MCP", status="RUNNING", stage_results=dict(stage_results))
             # 顺序：先注册数据集再连 server。mock server 启动时通过 env 注入数据映射，
             # register_datasets 必须先于 connect_servers，否则 mock 进程拿不到 fixtures。
-            self.adapter.register_datasets(datasets)
+            self.adapter.register_datasets(datasets, run_id=run_id)
             self.adapter.connect_servers(scenario.mcp.servers)
             # 只注册输入数据（fixtures）：参考数据（data.reference）不注册进 adapter，
             # agent 的工具解析不到它，避免标准答案被当作可用数据集操作。
@@ -411,6 +431,11 @@ class TestRunner:
             emit("stage", stage="CLEANUP", status="RUNNING", stage_results=dict(stage_results))
             self.fixture_manager.cleanup(test_context)
             self.adapter.close()
+            if data_service is not None and registration is not None:
+                try:
+                    data_service.release_run(run_id)
+                except DataServiceError as release_error:
+                    _failure(failures, phase="CLEANUP", code="release_error", message=str(release_error), source="cleanup")
             stage_results["CLEANUP"] = "PASSED"
 
             stage_results["GENERATE_REPORT"] = "RUNNING"
@@ -486,6 +511,11 @@ class TestRunner:
                     pass  # 异常路径的关闭失败不掩盖原始错误
             self.fixture_manager.cleanup(test_context)
             self.adapter.close()
+            if data_service is not None and registration is not None:
+                try:
+                    data_service.release_run(run_id)
+                except DataServiceError as release_error:
+                    _failure(failures, phase="CLEANUP", code="release_error", message=str(release_error), source="cleanup")
             stage_results["CLEANUP"] = "PASSED"
             duration_ms = int((time.perf_counter() - start_time) * 1000)
             if scenario is None:

@@ -800,7 +800,7 @@ docker compose build
 
 ### 已立项的近期方向
 
-当前工作树中的 `docs/plan/迭代5-MCP全面服务化与DB数据面.md` 计划：
+当前工作树中的 `docs/plan/迭代5B-MCP全面服务化与DB数据面.md` 计划：
 
 - 删除 `mock/stdio` 正式通道；
 - 只保留网络 MCP；

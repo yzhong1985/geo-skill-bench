@@ -115,63 +115,64 @@ class HeuristicSessionExecutor(Executor):
                     conversation=list(state.conversation),
                 )
 
-        if state.latest_metadata is None:
-            internal_calls.extend(self._load_required_references(state, ["plan", "data", "metadata"]))
-            metadata_call = self.adapter.invoke("query_dataset_metadata", {"dataset": state.resolved_dataset})
-            state.latest_metadata = metadata_call.result or {}
-            tool_calls = internal_calls + [metadata_call]
-            if metadata_call.status != "success":
-                response = f"数据元信息查询失败：{metadata_call.error_message or 'unknown error'}"
-                state.conversation.append({"role": "assistant", "content": response})
-                return ExecutorStepResult(
-                    response=response,
-                    finished=True,
-                    tool_calls=tool_calls,
-                    error_message=metadata_call.error_message,
-                    conversation=list(state.conversation),
-                )
-        else:
-            tool_calls = internal_calls
-
-        working_dataset = state.resolved_dataset
-        target_crs = (state.latest_metadata or {}).get("crs", "")
         available_tools = state.request.test_context.get("mcp_tools", {})
-        if target_crs.upper() == "EPSG:4326" and "reproject_dataset" in available_tools:
-            reproject_call = self.adapter.invoke(
-                "reproject_dataset",
-                {"dataset": state.resolved_dataset, "target_crs": "EPSG:3857", "output_alias": f"{state.resolved_dataset}_metric"},
-            )
-            tool_calls.append(reproject_call)
-            if reproject_call.status == "success":
-                working_dataset = reproject_call.result["dataset"]
-                target_crs = reproject_call.result["crs"]
+        tool_calls = list(internal_calls)
+        tool_calls.extend(self._load_required_references(state, ["plan", "data", "metadata", "buffer", "result", "output"]))
 
-        tool_calls.extend(self._load_required_references(state, ["buffer", "result", "output"]))
-        buffer_call = self.adapter.invoke(
-            "create_buffer",
-            {
-                "dataset": working_dataset,
-                "distance": state.resolved_distance,
-                "distance_unit": "meter",
-                "output_alias": "buffer_result",
-            },
-        )
+        source_dataset = self._source_dataset_name(state)
+        if "createBuffer" in available_tools:
+            buffer_call = self.adapter.invoke(
+                "createBuffer",
+                {
+                    "sourceDataset": source_dataset,
+                    "bufferDistance": str(int(state.resolved_distance) if float(state.resolved_distance).is_integer() else state.resolved_distance),
+                    "bufferRadiusUnit": "米",
+                    "asyncExecution": False,
+                },
+            )
+        else:
+            buffer_call = self.adapter.invoke(
+                "create_buffer",
+                {
+                    "dataset": source_dataset,
+                    "distance": state.resolved_distance,
+                    "distance_unit": "meter",
+                    "output_alias": "buffer_result",
+                },
+            )
         tool_calls.append(buffer_call)
-        if buffer_call.status != "success":
-            response = f"缓冲区分析失败：{buffer_call.error_message or 'unknown error'}"
+        if buffer_call.status != "success" or (buffer_call.result or {}).get("success") is False:
+            error_message = (
+                (buffer_call.result or {}).get("error")
+                or buffer_call.error_message
+                or "unknown error"
+            )
+            response = f"缓冲区分析失败：{error_message}"
             state.conversation.append({"role": "assistant", "content": response})
             return ExecutorStepResult(
                 response=response,
                 finished=True,
                 tool_calls=tool_calls,
-                error_message=buffer_call.error_message,
+                error_message=error_message,
                 conversation=list(state.conversation),
             )
 
+        handle = (buffer_call.result or {}).get("handle") or (buffer_call.result or {}).get("bufferResult")
+        if not handle:
+            error_message = (buffer_call.result or {}).get("note") or "createBuffer did not return a result handle"
+            response = f"缓冲区分析失败：{error_message}"
+            state.conversation.append({"role": "assistant", "content": response})
+            return ExecutorStepResult(
+                response=response,
+                finished=True,
+                tool_calls=tool_calls,
+                error_message=error_message,
+                conversation=list(state.conversation),
+            )
         prefix = "[FINAL]\n"
         response = (
             f"{prefix}已完成 {state.resolved_dataset} 数据的 {state.resolved_distance:g} 米缓冲区分析。"
-            f" 结果数据句柄为 {buffer_call.result['handle']}，输出 CRS 为 {target_crs}。"
+            f" 结果数据句柄为 {handle}。"
         )
         artifacts = {"result_dataset": buffer_call.result}
         if self.compatibility_note:
@@ -190,6 +191,21 @@ class HeuristicSessionExecutor(Executor):
 
     def close_session(self, session_id: str) -> None:
         self.sessions.pop(session_id, None)
+
+    def _source_dataset_name(self, state: HeuristicSessionState) -> str:
+        datasets = state.request.test_context.get("datasets", {})
+        dataset = datasets.get(state.resolved_dataset) or {}
+        if isinstance(dataset, dict):
+            logical_id = (dataset.get("metadata") or {}).get("logical_id")
+            if logical_id:
+                return str(logical_id)
+            source_alias = dataset.get("source_alias")
+            if source_alias:
+                return str(source_alias)
+            name = dataset.get("name")
+            if name:
+                return str(name)
+        return str(state.resolved_dataset)
 
     def _infer_dataset_alias(self, text: str, datasets: dict[str, Any]) -> str | None:
         lowered = text.lower()

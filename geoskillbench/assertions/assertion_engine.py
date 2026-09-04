@@ -7,11 +7,19 @@ from geoskillbench.models.scenario import AssertionConfig
 from geoskillbench.models.test_context import TestContext
 from geoskillbench.recorder.execution_recorder import ExecutionRecorder
 from geoskillbench.assertions.result_comparator import ResultComparator
+from geoskillbench.assertions.sql_result_comparator import PostgisResultComparator, dataset_sql_name
 
 
 class AssertionEngine:
-    def __init__(self) -> None:
-        self.comparator = ResultComparator()
+    def __init__(
+        self,
+        comparator: ResultComparator | None = None,
+        sql_comparator: PostgisResultComparator | None = None,
+        result_locator: Any | None = None,
+    ) -> None:
+        self.comparator = comparator or ResultComparator()
+        self.sql_comparator = sql_comparator
+        self.result_locator = result_locator
 
     def run(
         self,
@@ -223,7 +231,7 @@ class AssertionEngine:
                 message=f"Result dataset not found: {target}",
                 target=target,
             )
-        reference_dataset = test_context.reference_datasets.get(assertion.reference) or test_context.datasets.get(assertion.reference)
+        reference_dataset = test_context.reference_datasets.get(assertion.reference)
         if reference_dataset is None:
             return AssertionItemResult(
                 type=assertion.type,
@@ -231,19 +239,32 @@ class AssertionEngine:
                 message=f"Reference dataset not found: {assertion.reference}",
                 target=target,
             )
+        params = {k: v for k, v in {
+            "min": assertion.min,
+            "max_ratio": assertion.max_ratio,
+            "max_meters": assertion.max_meters,
+            "mode": assertion.mode,
+            "count": assertion.count,
+        }.items() if v is not None}
         try:
-            cmp = self.comparator.compare(
-                result_dataset,
-                reference_dataset,
-                metric,
-                **{k: v for k, v in {
-                    "min": assertion.min,
-                    "max_ratio": assertion.max_ratio,
-                    "max_meters": assertion.max_meters,
-                    "mode": assertion.mode,
-                    "count": assertion.count,
-                }.items() if v is not None},
+            location = self.result_locator(target) if callable(self.result_locator) else None
+            result_table = dataset_sql_name(result_dataset, location)
+            reference_table = dataset_sql_name(reference_dataset)
+            use_postgis = (
+                self.sql_comparator is not None
+                and bool(result_table)
+                and bool(reference_table)
             )
+            if use_postgis:
+                cmp = self.sql_comparator.compare(result_table, reference_table, metric, **params)
+                backend = "postgis"
+            elif getattr(result_dataset, "path", None) or getattr(reference_dataset, "path", None):
+                cmp = self.comparator.compare(result_dataset, reference_dataset, metric, **params)
+                backend = "file"
+            elif self.sql_comparator is None:
+                raise ValueError("result_* 库内比对需要 GEO_EVAL_DATABASE_URL（结果库，不是 DATABASE_URL 报告库）")
+            else:
+                raise ValueError("in-db comparison requires result and reference table names")
         except Exception as exc:
             return AssertionItemResult(
                 type=assertion.type,
@@ -256,6 +277,9 @@ class AssertionEngine:
             passed=cmp.passed,
             message=cmp.detail,
             target=target,
+            actual=cmp.actual,
+            expected=cmp.expected,
+            backend=backend,
         )
 
     def _normalize(self, value: Any) -> Any:

@@ -16,14 +16,14 @@ from __future__ import annotations
 import asyncio
 import atexit
 import json
-import re
-import shutil
-import sys
+import os
 import threading
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
+
+import httpx
 
 from geoskillbench.models.result import ToolCallRecord
 from geoskillbench.models.scenario import MCPServerConfig, ToolRef
@@ -79,46 +79,40 @@ def schema_to_pydantic_model(
 class _MCPConnection:
     """一条到 MCP server 的连接（async 客户端，由 adapter 的后台 loop 线程驱动）。"""
 
-    def __init__(self, server_id: str, server: MCPServerConfig, datasets_env: str) -> None:
+    def __init__(self, server_id: str, server: MCPServerConfig) -> None:
         self.server_id = server_id
         self.server = server
-        self.datasets_env = datasets_env
         self._stack: AsyncExitStack | None = None
         self.session: Any | None = None
         self.tools: list[Any] = []
 
     async def connect(self) -> list[Any]:
-        transport = (self.server.transport or "stdio").lower()
-        if transport == "mock":
-            # 存量场景 transport=mock：mock 即本地 stdio server，等价映射。
-            transport = "stdio"
+        transport = self.server.transport.lower()
         self._stack = AsyncExitStack()
-        if transport == "stdio":
-            from mcp import ClientSession
-            from mcp.client.stdio import StdioServerParameters, stdio_client
-
-            mock_script = str(Path(__file__).resolve().parent / "mock_gis_server.py")
-            params = StdioServerParameters(
-                command=sys.executable,
-                args=[mock_script],
-                env={"GEO_MCP_DATASETS": self.datasets_env},
-            )
-            read, write = await self._stack.enter_async_context(stdio_client(params))
-        elif transport in ("sse", "http"):
+        headers: dict[str, str] = {}
+        if self.server.credential_env:
+            token = os.environ.get(self.server.credential_env, "")
+            if token:
+                headers["Authorization"] = f"Bearer {token}"
+        if transport == "sse":
             from mcp import ClientSession
             from mcp.client.sse import sse_client
 
-            if not self.server.url:
-                raise ValueError(
-                    f"MCP server '{self.server_id}' transport='{transport}' 需要 url（远程服务地址），"
-                    "mock/stdio 不需要。"
-                )
-            read, write = await self._stack.enter_async_context(sse_client(self.server.url))
-        else:
-            raise NotImplementedError(
-                f"MCP server '{self.server_id}' transport='{transport}' 暂不支持："
-                "支持 stdio/mock（本地）与 sse/http（远程）。"
+            read, write = await self._stack.enter_async_context(
+                sse_client(self.server.url, headers=headers or None)
             )
+        elif transport == "http":
+            from mcp import ClientSession
+            from mcp.client.streamable_http import streamable_http_client
+
+            read, write, _ = await self._stack.enter_async_context(
+                streamable_http_client(
+                    self.server.url,
+                    http_client=httpx.AsyncClient(headers=headers or None),
+                )
+            )
+        else:  # model validation normally catches this; keep a defensive boundary for direct callers.
+            raise ValueError(f"Unsupported MCP transport: {transport}")
         self.session = await self._stack.enter_async_context(ClientSession(read, write))
         await self.session.initialize()
         self.tools = (await self.session.list_tools()).tools
@@ -147,7 +141,8 @@ class MCPToolAdapter:
         self._servers: dict[str, MCPServerConfig] = {}
         self._catalog: dict[str, ToolDefinition] = {}
         self._dataset_store: dict[str, DatasetContext] = {}
-        self._output_dir: Path | None = None
+        self._result_locations: dict[str, dict[str, str]] = {}
+        self._run_id: str | None = None
         self._conns: dict[str, _MCPConnection] = {}
         self._loop: asyncio.AbstractEventLoop | None = None
         self._loop_thread: threading.Thread | None = None
@@ -172,26 +167,17 @@ class MCPToolAdapter:
     # ---------- 配置与连接 ----------
 
     def set_output_dir(self, path: str | Path | None) -> None:
-        """生成数据集的落盘目录（runner 每次 run 前设置，run_id 隔离）。"""
-        self._output_dir = Path(path) if path else None
+        """保留旧 API 以兼容调用方；服务化结果不在 client 端落盘。"""
+        return None
 
     def connect_servers(self, servers: list[MCPServerConfig]) -> None:
-        """连接所有 server，tools/list 自动发现工具填入 _catalog。
-
-        注意：mock server 的数据映射在进程启动时通过 env 注入，因此
-        ``register_datasets`` 必须先于 ``connect_servers`` 调用。
-        """
+        """连接所有网络 server，tools/list 自动发现工具。"""
         self._servers = {server.id: server for server in servers}
-        datasets_env = json.dumps(
-            {alias: dataset.model_dump() for alias, dataset in self._dataset_store.items()},
-            ensure_ascii=False,
-        )
+        self._catalog.clear()
         for server in servers:
-            conn = _MCPConnection(server.id, server, datasets_env)
+            conn = _MCPConnection(server.id, server)
             tools = self._run_async(conn.connect())
             with self._lock:
-                # mock 下多个 server 暴露同名工具集，工具身份以 name 为准，保留首个归属；
-                # 云端接入后如出现跨 server 同名工具，再引入 (server, name) 复合命名空间。
                 for tool in tools:
                     self._catalog.setdefault(
                         tool.name,
@@ -203,8 +189,9 @@ class MCPToolAdapter:
                     )
             self._conns[server.id] = conn
 
-    def register_datasets(self, datasets: dict[str, DatasetContext]) -> None:
+    def register_datasets(self, datasets: dict[str, DatasetContext], run_id: str | None = None) -> None:
         self._dataset_store = dict(datasets)
+        self._run_id = run_id or next((item.run_id for item in datasets.values() if item.run_id), None)
 
     # ---------- 工具清单与校验 ----------
 
@@ -245,6 +232,19 @@ class MCPToolAdapter:
     def get_dataset_store(self) -> dict[str, DatasetContext]:
         return self._dataset_store
 
+    def get_result_location(self, alias: str) -> dict[str, str] | None:
+        """评测引擎读取真实结果用；不进入 Agent 可见结果或报告。"""
+        return self._result_locations.get(alias)
+
+    def register_result_payload(self, result: dict[str, Any]) -> dict[str, Any]:
+        """登记工具产出（MCP 或外部 agent tool_event）。非 GIS 结果原样返回。"""
+        if not isinstance(result, dict):
+            return result
+        try:
+            return self._register_generated_dataset(result)
+        except ValueError:
+            return result
+
     # ---------- 工具调用 ----------
 
     def invoke(self, tool_name: str, arguments: dict[str, Any]) -> ToolCallRecord:
@@ -269,8 +269,8 @@ class MCPToolAdapter:
             )
         try:
             result = self._run_async(conn.call(tool_name, arguments or {}))
-            self._register_generated_dataset(result)
-            return ToolCallRecord(tool_name=tool_name, arguments=arguments, result=result, status="success")
+            public_result = self._register_generated_dataset(result)
+            return ToolCallRecord(tool_name=tool_name, arguments=arguments, result=public_result, status="success")
         except Exception as exc:
             return ToolCallRecord(
                 tool_name=tool_name,
@@ -285,7 +285,9 @@ class MCPToolAdapter:
         self._conns.clear()
         self._catalog.clear()
         self._dataset_store.clear()
+        self._result_locations.clear()
         self._servers.clear()
+        self._run_id = None
         if not conns or self._loop is None:
             return
         try:
@@ -299,42 +301,78 @@ class MCPToolAdapter:
         except Exception:
             pass
 
-    # ---------- 生成数据集注册与落盘（client 端职责） ----------
+    # ---------- 生成数据集登记 ----------
 
-    def _register_generated_dataset(self, result: dict[str, Any]) -> None:
-        """create_buffer/reproject 返回的生成数据集：落盘到 output_dir 并登记进 _dataset_store。
-
-        server 端是无状态的（算完返回临时文件路径），结果持久化归 client 端。
-        """
+    def _register_generated_dataset(self, result: dict[str, Any]) -> dict[str, Any]:
+        """登记服务端结果。对外只返回不透明 handle，物理表名/URL 仅内部保留。"""
         if not isinstance(result, dict):
-            return
-        alias = result.get("dataset")
-        handle = result.get("handle")
-        path = result.get("path")
-        if not (alias and handle and path):
-            return
-        local_path = self._persist_result(str(path), alias)
-        self._dataset_store[alias] = DatasetContext(
-            handle=handle,
-            name=alias,
-            geometry_type=result.get("geometry_type"),
-            crs=result.get("crs"),
-            feature_count=result.get("feature_count"),
-            fields=result.get("fields") or [],
-            path=local_path,
-            source_alias=alias,
-            metadata={"source": "mcp_generated", "server_side_path": str(path)},
-        )
-        result["path"] = local_path
+            return result
 
-    def _persist_result(self, src: str, alias: str) -> str:
-        if self._output_dir is None:
-            self._output_dir = Path("reports") / "outputs"
-        self._output_dir.mkdir(parents=True, exist_ok=True)
-        safe = re.sub(r"[^A-Za-z0-9_\-]+", "_", alias)
-        target = self._output_dir / f"{safe}.geojson"
-        try:
-            shutil.copyfile(src, target)
-        except OSError:
-            return src  # 源文件读不到则退回 server 端路径
-        return str(target)
+        if result.get("success") is True and not (result.get("bufferResult") or result.get("tableName") or result.get("handle")):
+            raise ValueError(result.get("note") or "MCP reported success without a result dataset")
+        is_supermap = result.get("success") is True and ("bufferResult" in result or "tableName" in result)
+        if is_supermap:
+            raw_handle = str(result.get("bufferResult") or result.get("tableName") or "")
+            alias = "buffer_result"
+            run_id = self._run_id or "run"
+            safe_handle = f"dh_{run_id}_{alias}"
+            self._result_locations[alias] = {
+                "tableName": str(result.get("tableName") or ""),
+                "svc_url": str(result.get("bufferResultSvcURL") or ""),
+                "bufferResult": raw_handle,
+            }
+            self._dataset_store[alias] = DatasetContext(
+                handle=safe_handle,
+                name=alias,
+                role="result",
+                run_id=run_id,
+                source_alias=alias,
+            )
+            return {
+                "success": True,
+                "handle": safe_handle,
+                "dataset": alias,
+                "alias": alias,
+                "role": "result",
+                "run_id": run_id,
+            }
+
+        descriptor = result.get("dataset") if isinstance(result.get("dataset"), dict) else result
+        alias = descriptor.get("alias") or result.get("dataset")
+        handle = descriptor.get("handle")
+        if not (alias and handle):
+            return result
+        leaked = ("path", "table", "tableName", "schema", "server_side_path", "bufferResultSvcURL")
+        if any(key in result or key in descriptor for key in leaked):
+            raise ValueError("MCP dataset result contains a prohibited physical location field")
+        run_id = descriptor.get("run_id")
+        expected_run_id = self._run_id
+        if expected_run_id and run_id != expected_run_id:
+            raise ValueError("MCP dataset result belongs to another run")
+        role = descriptor.get("role", "result")
+        if role != "result":
+            return result
+        self._dataset_store[str(alias)] = DatasetContext(
+            handle=str(handle),
+            name=str(alias),
+            role="result",
+            run_id=run_id,
+            geometry_type=descriptor.get("geometry_type"),
+            crs=descriptor.get("crs") or (f"EPSG:{descriptor['srid']}" if descriptor.get("srid") else None),
+            feature_count=descriptor.get("feature_count"),
+            fields=descriptor.get("fields") or [],
+            source_alias=str(alias),
+            expires_at=descriptor.get("expires_at"),
+            metadata=descriptor.get("metadata") or {},
+        )
+        return {
+            "success": True,
+            "handle": str(handle),
+            "dataset": str(alias),
+            "alias": str(alias),
+            "role": "result",
+            "run_id": run_id,
+            "geometry_type": descriptor.get("geometry_type"),
+            "crs": descriptor.get("crs"),
+            "feature_count": descriptor.get("feature_count"),
+        }

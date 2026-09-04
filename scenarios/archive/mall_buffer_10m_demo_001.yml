@@ -1,0 +1,132 @@
+id: mall_buffer_10m_demo_001
+name: 商场周边 10 米缓冲区分析（真实数据演示）
+version: 1.0.0
+type: agent_skill_test
+description: >
+  完整可落地的真实数据 demo：真实商场点数据（591 个点，CRS84）做 10 米缓冲区分析，
+  用参考缓冲区（591 个多边形）做结果内容比对（重叠率/面积误差/偏移/要素数）。
+  真实 LLM（deepseek-v4-flash）驱动本地 skill + mock MCP 工具全流程。
+target:
+  skill_id: gis_buffer_analysis
+  skill_version: 1.0.0
+runtime:
+  executor: skill
+  agent_model: deepseek-v4-flash
+  max_turns: 6
+  timeout_seconds: 300
+  memory_enabled: false
+data:
+  fixtures:
+    - id: 商场
+      name: 商场点数据
+      type: vector
+      format: geojson
+      path: ../fixtures/商场.json
+      crs: EPSG:4326
+      geometry_type: Point
+  reference:
+    - id: 参考缓冲
+      name: 参考缓冲区
+      format: geojson
+      path: ../fixtures/Buffer.json
+      crs: EPSG:4326
+mcp:
+  servers:
+    - id: gpa_vector
+      name: GPA 矢量分析 MCP 服务
+      transport: http
+      url: http://127.0.0.1:8765/mcp
+      required: true
+    - id: metadata
+      name: 空间元数据 MCP 服务
+      transport: http
+      url: http://127.0.0.1:8765/mcp
+      required: true
+  tools:
+    required:
+      - server: metadata
+        name: query_dataset_metadata
+      - server: gpa_vector
+        name: create_buffer
+    optional:
+      - server: gpa_vector
+        name: reproject_dataset
+      - server: gpa_vector
+        name: publish_map
+skill:
+  load_mode: file
+  path: ../skills/gis_buffer_analysis.skill.yml
+  required: true
+user_task: >
+  请帮我生成 商场 数据周边 10 米的服务范围。
+agent:
+  user_enabled: true
+  user_profile: normal_user
+  user_max_turns: 5
+  user_goal: >
+    如果智能体询问使用哪个数据，请回答使用 商场 数据。
+    如果智能体询问缓冲距离，请回答 10 米。
+    如果智能体询问输出格式，请回答 GeoJSON。
+    不要主动提供未被询问的信息。
+  user_model: rule-based-user
+expected_behavior:
+  should_load_skills:
+    - gis_buffer_analysis
+  should_call_tools:
+    - query_dataset_metadata
+    - create_buffer
+  optional_tools:
+    - reproject_dataset
+    - publish_map
+  should_not:
+    - 直接在 EPSG:4326 下按米做平面缓冲
+    - 编造不存在的数据字段
+    - 在缺少输入数据时直接执行
+assertions:
+  # 过程断言
+  - type: skill_loaded
+    skill_id: gis_buffer_analysis
+  - type: tool_called
+    tool: query_dataset_metadata
+  - type: tool_called
+    tool: create_buffer
+  - type: tool_argument_equals
+    tool: create_buffer
+    argument: distance
+    value: 10
+  - type: result_dataset_exists
+    alias: buffer_result
+  - type: result_geometry_type_in
+    target: buffer_result
+    values:
+      - Polygon
+      - MultiPolygon
+  # 结果内容断言（对比 参考缓冲；去掉 fields，因 bufferradiusleft 是参考特有列）
+  - type: result_overlap_ratio
+    target: buffer_result
+    reference: 参考缓冲
+    min: 0.9
+  - type: result_area_error_max
+    target: buffer_result
+    reference: 参考缓冲
+    max_ratio: 0.05
+  - type: result_distance_max
+    target: buffer_result
+    reference: 参考缓冲
+    max_meters: 20
+  - type: result_feature_count
+    target: buffer_result
+    reference: 参考缓冲
+    count: 591
+judge:
+  enabled: true
+  rubric:
+    - 是否正确识别为缓冲区分析任务
+    - 是否加载了 gis_buffer_analysis skill
+    - 是否正确使用 商场 数据
+    - 是否正确调用 query_dataset_metadata 和 create_buffer
+    - 是否合理处理 EPSG:4326 与米级缓冲问题
+    - 最终回答是否包含结果数据句柄、缓冲距离（10 米）和简要说明
+pass_criteria:
+  required_assertions_passed: true
+  judge_score_min: 0.8

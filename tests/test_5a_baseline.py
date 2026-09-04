@@ -13,7 +13,7 @@ from geoskillbench.security.paths import resolve_inside
 from geoskillbench.security.redaction import redact
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-SAMPLE_SCENARIO = REPO_ROOT / "scenarios" / "buffer_school_500m_reference_001.yml"
+SAMPLE_SCENARIO = REPO_ROOT / "scenarios" / "buffer_school_500m_5b_001.yml"
 
 
 def test_empty_assertions_are_skipped_not_vacuous_pass() -> None:
@@ -172,3 +172,40 @@ class TestJudgeSemantics:
         assert result.judge_mode == "error"
         assert result.status == "unavailable"
         assert result.passed is False
+
+
+def test_report_generator_writes_run_directory(tmp_path: Path) -> None:
+    from geoskillbench.models.result import TestResult
+    from geoskillbench.reports.report_generator import ReportGenerator
+
+    report_gen = ReportGenerator()
+    test_result = TestResult(
+        run_id="run_test_123",
+        scenario_id="scenario_test",
+        scenario_name="Test Scenario",
+        status="passed",
+        duration_ms=100,
+        stage_results={},
+        tool_calls=[],
+        assertions=[],
+        judge={},
+        conversation=[],
+        final_output={"final_response": "done"},
+        loaded_skill_references=[],
+        errors=[],
+        operational_status="succeeded",
+        evaluation_verdict="passed",
+        termination_reason="completed",
+        archive_status="succeeded",
+        cleanup_status="succeeded",
+        failures=[],
+    )
+    json_path, md_path = report_gen.write_reports(str(tmp_path), test_result)
+    assert json_path == tmp_path / "runs" / "run_test_123" / "result.json"
+    assert md_path == tmp_path / "runs" / "run_test_123" / "report.md"
+    assert json_path.exists()
+    assert md_path.exists()
+    # 验证兼容旧路径产物
+    assert (tmp_path / "json" / "scenario_test.json").exists()
+    assert (tmp_path / "markdown" / "scenario_test.md").exists()
+
